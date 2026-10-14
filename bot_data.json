@@ -1,0 +1,61 @@
+{
+  "days": {
+    "2026-10-13": {
+      "ids": [],
+      "members": {
+        "7815818738": {
+          "name": "𝙾𝙼𝙾𝚁 𝙵𝙰𝚁𝚄𝙺",
+          "received": 0,
+          "new": 0,
+          "duplicate": 0,
+          "rejected": 0,
+          "all_ids": [],
+          "new_ids": [],
+          "duplicate_ids": [],
+          "rejected_ids": []
+        }
+      }
+    }
+  },
+  "members": {
+    "8276619021": {
+      "name": "OMOR FARUK",
+      "username": "omorfaruk820",
+      "days": {
+        "2026-10-05": {
+          "received": 6,
+          "duplicate": 3,
+          "new": 3
+        }
+      }
+    },
+    "8701531805": {
+      "name": "Hussein Islam",
+      "username": "",
+      "days": {
+        "2026-10-05": {
+          "received": 1,
+          "duplicate": 1,
+          "new": 0
+        }
+      }
+    }
+  },
+  "settings": {
+    "channel": "@OMORTECH",
+    "admins": [
+      7815818738
+    ],
+    "target_chat_ids": [
+      6945991387,
+      -1003619773267
+    ],
+    "maintenance": false,
+    "duplicate_mode": "daily",
+    "admin_id": 7815818738,
+    "approval_mode": true,
+    "min_ids_limit": 2
+  },
+  "banned_users": [],
+  "pending_submissions": {}
+}
