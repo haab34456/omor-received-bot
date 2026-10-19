@@ -5,7 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import io
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, CopyTextButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -24,7 +24,7 @@ with open(os.path.join(BASE_DIR, "config.txt"), "r", encoding="utf-8") as f:
     BOT_TOKEN = f.read().strip()
 
 DEFAULT_CHANNEL = "@OMORTECH"
-DEFAULT_ADMIN_ID = 7815818738
+DEFAULT_ADMIN_ID = 8276619021
 
 DEFAULT_TARGET_CHAT_IDS = [
     6945991387,
@@ -332,8 +332,8 @@ async def process_valid_submission(user, ids, context, update_msg, file_info=Non
     save_db()
 
     if new_ids:
-        single_copy_list = "\n".join([f"<code>{i}</code>" for i in new_ids])
-        all_in_one_code = f"<pre>{'\n'.join(new_ids)}</pre>"
+        # সব আইডিগুলোকে একসাথে টেক্সট আকারে প্রস্তুত করা হলো
+        all_ids_text = "\n".join(new_ids)
         
         report = (
             "<b>📋 NEW APPROVED SUBMISSION</b>\n\n"
@@ -341,12 +341,30 @@ async def process_valid_submission(user, ids, context, update_msg, file_info=Non
             f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
             f"📅 <b>Date:</b> {date}\n\n"
             f"🟢 <b>New IDs ({len(new_ids)}):</b>\n"
-            f"{single_copy_list}\n\n"
-            f"⚡ <b>COPY ALL IN ONE CLICK:</b>\n"
-            f"{all_in_one_code}"
+            f"<pre>{all_ids_text}</pre>"
         )
 
-        await send_receivers(context, report)
+        # দ্বিতীয় স্ক্রিনশটের মতো সরাসরি কপি বাটন তৈরি করা হলো
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"📋 {len(new_ids)} টি আইডি কপি করুন", 
+                    copy_text=CopyTextButton(text=all_ids_text)
+                )
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        for chat_id in DATA["settings"]["target_chat_ids"]:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=report,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"Message send failed for {chat_id}: {e}")
 
         if file_info and file_info.get("document_id"):
             for chat_id in DATA["settings"]["target_chat_ids"]:
@@ -358,20 +376,6 @@ async def process_valid_submission(user, ids, context, update_msg, file_info=Non
                     )
                 except Exception:
                     pass
-
-    try:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=(
-                f"🎉 <b>আপনার পাঠানো <code>{len(ids)}</code> টি আইডি প্রসেস করা হয়েছে!</b>\n\n"
-                f"📥 Total Received: <code>{len(ids)}</code>\n"
-                f"🟢 New Approved: <code>{len(new_ids)}</code>\n"
-                f"♻️ Duplicate Skipped: <code>{len(duplicate_ids)}</code>"
-            ),
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
 
 
 async def handle_incoming_data(user, ids, context, update_msg, file_info=None):
@@ -930,20 +934,31 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"📅 <b>Date:</b> <code>{date}</code>\n\n📭 আজকের দিনে এখনো কোনো আইডি জমা পড়েনি।", parse_mode="HTML")
             return
 
-        lines = [
-            "<b>📋 TODAY'S ALL RECEIVED IDs</b>",
-            f"📅 <b>Date:</b> <code>{date}</code>",
-            f"📦 <b>Total Count:</b> <code>{len(day_data['ids'])}</code>\n",
-            "-----------------------------------"
-        ]
-
-        formatted_ids = [f"<code>{i}</code>" for i in day_data["ids"]]
-        all_in_one_code = f"<pre>{'\n'.join(day_data['ids'])}</pre>"
+        all_ids_text = "\n".join(day_data["ids"])
         
-        full_output = "\n".join(lines) + "\n" + "\n".join(formatted_ids) + f"\n\n⚡ <b>COPY ALL IN ONE CODE:</b>\n{all_in_one_code}"
+        full_output = (
+            "<b>📋 TODAY'S ALL RECEIVED IDs</b>\n"
+            f"📅 <b>Date:</b> <code>{date}</code>\n"
+            f"📦 <b>Total Count:</b> <code>{len(day_data['ids'])}</code>\n\n"
+            f"<pre>{all_ids_text}</pre>"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"📋 {len(day_data['ids'])} টি আইডি কপি করুন", 
+                    copy_text=CopyTextButton(text=all_ids_text)
+                )
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
         for start_pos in range(0, len(full_output), 3500):
-            await query.message.reply_text(full_output[start_pos:start_pos + 3500], parse_mode="HTML")
+            await query.message.reply_text(
+                full_output[start_pos:start_pos + 3500], 
+                reply_markup=reply_markup if start_pos == 0 else None,
+                parse_mode="HTML"
+            )
         return
 
     if data == "adm_reject_bad_ids":
