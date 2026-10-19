@@ -1007,6 +1007,23 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_db()
 
         try:
+            await query.edit_message_text(f"🟢 Approved Successful!\n👤 User: {sub_data['full_name']} ({len(sub_data['ids'])} IDs Batch)")
+        except Exception:
+            pass
+        return
+
+        await process_valid_submission(
+            d_user,
+            sub_data["ids"],
+            context,
+            query.message,
+            sub_data["file_info"]
+        )
+
+        del DATA["pending_submissions"][sub_id]
+        save_db()
+
+        try:
             await query.edit_message_text(f"🟢 Partial Approval Successful!\n👤 User: {sub_data['full_name']} ({len(sub_data['ids'])} IDs Batch)")
         except Exception:
             pass
