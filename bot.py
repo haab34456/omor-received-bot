@@ -995,6 +995,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+        # আইডিগুলো প্রসেস করার ফাংশন কল করা হলো
         await process_valid_submission(
             d_user,
             sub_data["ids"],
@@ -1003,43 +1004,53 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sub_data["file_info"]
         )
 
+        # সরাসরি ইউজারের ইনবক্সে সেই কাঙ্ক্ষিত সফলতার মেসেজ পাঠানোর লজিক
+        try:
+            # সাবমিশন অনুযায়ী হিসাব বের করা
+            date = today()
+            day = get_day(date)
+            mode = DATA["settings"]["duplicate_mode"]
+            if mode == "all_time":
+                all_existing_ids = set()
+                for d_key, d_val in DATA["days"].items():
+                    if d_key != date:
+                        all_existing_ids.update(d_val["ids"])
+                seen_today = all_existing_ids
+            else:
+                seen_today = set()
+                for i in day["ids"][:-len(sub_data["ids"])]:
+                    seen_today.add(i)
+
+            temp_new = 0
+            temp_dup = 0
+            for item in sub_data["ids"]:
+                if item in seen_today:
+                    temp_dup += 1
+                else:
+                    temp_new += 1
+                    seen_today.add(item)
+
+            await context.bot.send_message(
+                chat_id=sub_data["user_id"],
+                text=(
+                    f"🎉 <b>আপনার পাঠানো <code>{len(sub_data['ids'])}</code> টি আইডি প্রসেস করা হয়েছে!</b>\n\n"
+                    f"📥 Total Received: <code>{len(sub_data['ids'])}</code>\n"
+                    f"🟢 New Approved: <code>{temp_new}</code>\n"
+                    f"♻️ Duplicate Skipped: <code>{temp_dup}</code>"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print("Failed to send success msg to user:", e)
+
         del DATA["pending_submissions"][sub_id]
         save_db()
 
         try:
-            await query.edit_message_text(f"🟢 Approved Successful!\n👤 User: {sub_data['full_name']} ({len(sub_data['ids'])} IDs Batch)")
+            await query.edit_message_text(f"🟢 Approved & Notified!\n👤 User: {sub_data['full_name']} ({len(sub_data['ids'])} IDs Batch)")
         except Exception:
             pass
         return
-
-        await process_valid_submission(
-            d_user,
-            sub_data["ids"],
-            context,
-            query.message,
-            sub_data["file_info"]
-        )
-
-        del DATA["pending_submissions"][sub_id]
-        save_db()
-
-        try:
-            await query.edit_message_text(f"🟢 Partial Approval Successful!\n👤 User: {sub_data['full_name']} ({len(sub_data['ids'])} IDs Batch)")
-        except Exception:
-            pass
-        return
-
-    if data.startswith("rej_"):
-        sub_id = data.replace("rej_", "")
-        sub_data = DATA["pending_submissions"].get(sub_id)
-
-        if not sub_data:
-            try:
-                await query.edit_message_text("⚠️ এই সাবমিশনটি ইতিমধ্যে প্রসেস বা বাতিল করা হয়েছে।")
-            except Exception:
-                pass
-            return
-
         target_user_id = sub_data["user_id"]
         total_ids_count = len(sub_data["ids"])
 
