@@ -24,7 +24,7 @@ with open(os.path.join(BASE_DIR, "config.txt"), "r", encoding="utf-8") as f:
     BOT_TOKEN = f.read().strip()
 
 DEFAULT_CHANNEL = "@OMORTECH"
-DEFAULT_ADMIN_ID = 8276619021
+DEFAULT_ADMIN_ID = 7815818738
 
 DEFAULT_TARGET_CHAT_IDS = [
     6945991387,
