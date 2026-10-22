@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 import io
 
@@ -38,56 +38,54 @@ TZ = ZoneInfo("Asia/Dhaka")
 # ================= DATABASE & SETTINGS =================
 
 def load_db():
+    default_data = {
+        "settings": {
+            "channel": DEFAULT_CHANNEL,
+            "admin_id": DEFAULT_ADMIN_ID,
+            "target_chat_ids": DEFAULT_TARGET_CHAT_IDS,
+            "maintenance": False,
+            "approval_mode": True,
+            "min_ids_limit": 1,
+            "duplicate_mode": "daily",
+            "price_only_uid": 1.5,
+            "price_page_uid": 2.5,
+            "payment_msg_template": "🎉 <b>আপনার পেমেন্ট সফলভাবে পরিশোধ করা হয়েছে!</b>\n\n💵 <b>পরিশোধিত অর্থ:</b> {amount} BDT",
+            "work_schedule_enabled": False,
+            "start_time": "10:00",
+            "end_time": "22:00"
+        },
+        "payment_methods": ["bKash", "Nagad", "Rocket"],
+        "user_payment_details": {},
+        "user_languages": {},
+        "banned_users": [],
+        "pending_submissions": {},
+        "days": {},
+        "payments": {}
+    }
+
     if not os.path.exists(DB_FILE):
-        return {
-            "settings": {
-                "channel": DEFAULT_CHANNEL,
-                "admin_id": DEFAULT_ADMIN_ID,
-                "target_chat_ids": DEFAULT_TARGET_CHAT_IDS,
-                "maintenance": False,
-                "approval_mode": True,
-                "min_ids_limit": 1,
-                "duplicate_mode": "daily"
-            },
-            "banned_users": [],
-            "pending_submissions": {},
-            "days": {}
-        }
+        return default_data
 
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         data.setdefault("settings", {})
-        data["settings"].setdefault("channel", DEFAULT_CHANNEL)
-        data["settings"].setdefault("admin_id", DEFAULT_ADMIN_ID)
-        data["settings"].setdefault("target_chat_ids", DEFAULT_TARGET_CHAT_IDS)
-        data["settings"].setdefault("maintenance", False)
-        data["settings"].setdefault("approval_mode", True)
-        data["settings"].setdefault("min_ids_limit", 1)
-        data["settings"].setdefault("duplicate_mode", "daily")
+        for k, v in default_data["settings"].items():
+            data["settings"].setdefault(k, v)
         
+        data.setdefault("payment_methods", ["bKash", "Nagad", "Rocket"])
+        data.setdefault("user_payment_details", {})
+        data.setdefault("user_languages", {})
         data.setdefault("banned_users", [])
         data.setdefault("pending_submissions", {})
         data.setdefault("days", {})
+        data.setdefault("payments", {})
 
         return data
     except (json.JSONDecodeError, OSError):
         print("WARNING: Database read failed.")
-        return {
-            "settings": {
-                "channel": DEFAULT_CHANNEL,
-                "admin_id": DEFAULT_ADMIN_ID,
-                "target_chat_ids": DEFAULT_TARGET_CHAT_IDS,
-                "maintenance": False,
-                "approval_mode": True,
-                "min_ids_limit": 1,
-                "duplicate_mode": "daily"
-            },
-            "banned_users": [],
-            "pending_submissions": {},
-            "days": {}
-        }
+        return default_data
 
 
 DATA = load_db()
@@ -110,6 +108,26 @@ def today():
 
 def is_admin(user_id):
     return user_id == DATA["settings"]["admin_id"]
+
+
+def is_work_time():
+    s = DATA["settings"]
+    if not s.get("work_schedule_enabled", False):
+        return True
+    
+    now_time = datetime.now(TZ).time()
+    try:
+        sh, sm = map(int, s.get("start_time", "10:00").split(":"))
+        eh, em = map(int, s.get("end_time", "22:00").split(":"))
+        start_t = time(sh, sm)
+        end_t = time(eh, em)
+        
+        if start_t <= end_t:
+            return start_t <= now_time <= end_t
+        else:
+            return now_time >= start_t or now_time <= end_t
+    except Exception:
+        return True
 
 
 def get_day(date):
@@ -135,6 +153,8 @@ def get_member(day, user):
             "new": 0,
             "duplicate": 0,
             "rejected": 0,
+            "only_uid_count": 0,
+            "page_uid_count": 0,
             "all_ids": [],
             "new_ids": [],
             "duplicate_ids": [],
@@ -145,7 +165,23 @@ def get_member(day, user):
     member["name"] = user.full_name
     member.setdefault("rejected", 0)
     member.setdefault("rejected_ids", [])
+    member.setdefault("only_uid_count", 0)
+    member.setdefault("page_uid_count", 0)
     return member
+
+
+def calculate_member_earned(member):
+    p_only = DATA["settings"].get("price_only_uid", 0.0)
+    p_page = DATA["settings"].get("price_page_uid", 0.0)
+    only_c = member.get("only_uid_count", 0)
+    page_c = member.get("page_uid_count", 0)
+    
+    total_earned = (only_c * p_only) + (page_c * p_page)
+    return max(0.0, total_earned)
+
+
+def get_user_payment_status(uid, date):
+    return DATA["payments"].get(f"{uid}_{date}", "Unpaid")
 
 
 # ================= CHANNEL JOIN & BAN CHECK =================
@@ -176,15 +212,16 @@ async def require_join(update, context):
     ]]
 
     await update.effective_message.reply_text(
-        "🚫 সার্ভিসটি ব্যবহার করতে হলে প্রথমে আমাদের চ্যানেলে জয়েন করতে হবে।\n\n"
+        "🚫 সার্ভিসটি ব্যবহার করতে হলে প্রথমে আমাদের চ্যানেলে জয়েন করতে হবে。\n\n"
         "👉 চ্যানেলে জয়েন করার পর /start দিন।",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-# ================= START & STATUS =================
+# ================= START, LANGUAGE & STATUS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     user = update.effective_user
 
     if user.id in DATA["banned_users"]:
@@ -204,13 +241,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_member(day, user)
     save_db()
 
-    msg = (
-        "<b>🤖 OMOR TECH SUBMISSION BOT</b>\n\n"
-        f"👤 <b>Your Name:</b> {user.full_name}\n"
-        f"🆔 <b>Your User ID:</b> <code>{user.id}</code>\n\n"
-        "🟢 বট সক্রিয় আছে। আপনার প্রয়োজনীয় সংখ্যার ID list অথবা <code>.xlsx</code> ফাইল পাঠান।\n\n"
-        "📊 নিজের কাজের হিসাব দেখতে: /status"
-    )
+    uid_str = str(user.id)
+    pay_details = DATA["user_payment_details"].get(uid_str, {})
+    if isinstance(pay_details, dict) and pay_details:
+        pay_info = ", ".join([f"{m}: {n}" for m, n in pay_details.items()])
+    else:
+        pay_info = "নম্বর সেট করা হয়নি"
+
+    lang = DATA["user_languages"].get(uid_str, "bn")
+
+    if lang == "en":
+        msg = (
+            "<b>🤖 OMOR TECH SUBMISSION BOT</b>\n\n"
+            f"👤 <b>Name:</b> {user.full_name}\n"
+            f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
+            f"📱 <b>Payment Info:</b> <code>{pay_info}</code>\n\n"
+            "🟢 Bot is active. Send your ID list or <code>.xlsx</code> file.\n\n"
+            "📊 View your status: /status\n"
+            "💳 Set payment info: /setpayment\n"
+            "🌐 Change language: /language\n"
+            "🎫 Support: /support"
+        )
+    else:
+        msg = (
+            "<b>🤖 OMOR TECH SUBMISSION BOT</b>\n\n"
+            f"👤 <b>Name:</b> {user.full_name}\n"
+            f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
+            f"📱 <b>Payment Info:</b> <code>{pay_info}</code>\n\n"
+            "🟢 বট সক্রিয় আছে। আপনার প্রয়োজনীয় সংখ্যার ID list অথবা <code>.xlsx</code> ফাইল পাঠান।\n\n"
+            "📊 নিজের কাজের হিসাব দেখতে: /status\n"
+            "💳 পেমেন্ট নম্বর সেট করতে: /setpayment\n"
+            "🌐 ভাষা পরিবর্তন করতে: /language\n"
+            "🎫 সাহায্য পেতে: /support"
+        )
 
     reply_markup = None
     if is_admin(user.id):
@@ -220,6 +283,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.effective_message.reply_text(msg, parse_mode="HTML", reply_markup=reply_markup)
+
+
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("🇧🇩 বাংলা", callback_data="setlang_bn"),
+            InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en")
+        ]
+    ]
+    await update.effective_message.reply_text(
+        "🌐 <b>Select Your Preferred Language / আপনার পছন্দের ভাষা নির্বাচন করুন:</b>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+
+async def set_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    methods = DATA.get("payment_methods", ["bKash", "Nagad", "Rocket"])
+    
+    keyboard = []
+    for m in methods:
+        keyboard.append([InlineKeyboardButton(f"💳 {m}", callback_data=f"setpaym_{m}")])
+
+    await update.effective_message.reply_text(
+        "💳 <b>পেমেন্ট মেথড সিলেক্ট করুন:</b>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["waiting_for"] = "user_support_msg"
+    await update.effective_message.reply_text(
+        "📩 <b>SUPPORT & HELP DESK</b>\n\n"
+        "আপনার কোনো প্রশ্ন, সমস্যা বা পেমেন্ট সংক্রান্ত বিষয় থাকলে নিচে বিস্তারিত লিখে মেসেজ পাঠান। অ্যাডমিন আপনার বার্তাটি পেয়ে সরাসরি উত্তর দেবেন।",
+        parse_mode="HTML"
+    )
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,7 +341,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     total_received = total_new = total_dup = total_rej = 0
+    total_only_uid = total_page_uid = 0
+    total_earned = 0.0
     found = False
+    shown_days = 0
 
     for date in dates:
         member = DATA["days"][date]["members"].get(uid)
@@ -253,13 +357,28 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_new += member["new"]
         total_dup += member["duplicate"]
         total_rej += rej_count
+        
+        o_cnt = member.get("only_uid_count", 0)
+        p_cnt = member.get("page_uid_count", 0)
+        total_only_uid += o_cnt
+        total_page_uid += p_cnt
 
-        tag = " 🌟 (Today)" if date == today_date else ""
-        lines.extend([
-            f"📅 <b>Date:</b> <code>{date}</code>{tag}",
-            f"  📥 Total: <code>{member['received']}</code> | 🟢 New: <code>{member['new']}</code>",
-            f"  ♻️ Dup: <code>{member['duplicate']}</code> | 🚫 Rej: <code>{rej_count}</code>\n",
-        ])
+        earned = calculate_member_earned(member)
+        total_earned += earned
+
+        if shown_days < 7:
+            pay_st = get_user_payment_status(uid, date)
+            tag = " 🌟 (Today)" if date == today_date else ""
+            lines.extend([
+                f"📅 <b>Date:</b> <code>{date}</code>{tag}",
+                f"📥 Total Received: <code>{member['received']}</code>",
+                f"🟢 New IDs: <code>{member['new']}</code> (Only: {o_cnt} | Page: {p_cnt})",
+                f"♻️ Duplicate IDs: <code>{member['duplicate']}</code>",
+                f"🚫 Rejected IDs: <code>{rej_count}</code>",
+                f"💰 Earned Amount: <code>{earned:.2f} BDT</code> ({pay_st})",
+                "────────────────────\n"
+            ])
+            shown_days += 1
 
     if not found:
         lines.append("📭 আপনি এখনো কোনো আইডি জমা দেননি।")
@@ -267,37 +386,21 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lines.extend([
-        "━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━",
         "📦 <b>ALL-TIME SUMMARY</b>",
         f"📥 Total Submitted: <code>{total_received}</code>",
-        f"🟢 Total New: <code>{total_new}</code>",
+        f"🟢 Total New: <code>{total_new}</code> (Only: {total_only_uid} | Page: {total_page_uid})",
         f"♻️ Total Duplicate: <code>{total_dup}</code>",
         f"🚫 Total Rejected: <code>{total_rej}</code>",
+        f"💰 Total Earned: <code>{total_earned:.2f} BDT</code>",
     ])
 
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
-# ================= SEND TO RECEIVERS =================
-
-async def send_receivers(context, text):
-    async def _send_to_one(chat_id):
-        try:
-            for start_pos in range(0, len(text), 3500):
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=text[start_pos:start_pos + 3500],
-                    parse_mode="HTML"
-                )
-        except Exception as e:
-            print(f"Message send failed for {chat_id}: {e}")
-
-    await asyncio.gather(*[_send_to_one(cid) for cid in DATA["settings"]["target_chat_ids"]])
-
-
 # ================= ID & FILE PROCESSING =================
 
-async def process_valid_submission(user, ids, context, update_msg, file_info=None):
+async def process_valid_submission(user, ids, category, context, update_msg, file_info=None):
     date = today()
     day = get_day(date)
     member = get_member(day, user)
@@ -326,25 +429,45 @@ async def process_valid_submission(user, ids, context, update_msg, file_info=Non
     member["received"] += len(ids)
     member["new"] += len(new_ids)
     member["duplicate"] += len(duplicate_ids)
+    
+    if category == "ONLY UID":
+        member["only_uid_count"] += len(new_ids)
+    else:
+        member["page_uid_count"] += len(new_ids)
+
     member["all_ids"].extend(ids)
     member["new_ids"].extend(new_ids)
     member["duplicate_ids"].extend(duplicate_ids)
     save_db()
 
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                f"🟢 <b>আপনার সাবমিশন অনুমোদিত (Approved) হয়েছে!</b>\n\n"
+                f"🏷️ ক্যাটাগরি: {category}\n"
+                f"📦 মোট আইডি: {len(ids)}\n"
+                f"🟢 নতুন আইডি: {len(new_ids)} টি\n"
+                f"♻️ ডুপ্লিকেট আইডি: {len(duplicate_ids)} টি"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
     if new_ids:
-        # সব আইডিগুলোকে একসাথে টেক্সট আকারে প্রস্তুত করা হলো
         all_ids_text = "\n".join(new_ids)
         
         report = (
             "<b>📋 NEW APPROVED SUBMISSION</b>\n\n"
             f"👤 <b>Name:</b> {user.full_name}\n"
             f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
+            f"🏷️ <b>Category:</b> {category}\n"
             f"📅 <b>Date:</b> {date}\n\n"
             f"🟢 <b>New IDs ({len(new_ids)}):</b>\n"
             f"<pre>{all_ids_text}</pre>"
         )
 
-        # দ্বিতীয় স্ক্রিনশটের মতো সরাসরি কপি বাটন তৈরি করা হলো
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -372,13 +495,13 @@ async def process_valid_submission(user, ids, context, update_msg, file_info=Non
                     await context.bot.send_document(
                         chat_id=chat_id,
                         document=file_info["document_id"],
-                        caption=f"📁 File from {user.full_name} ({date})"
+                        caption=f"📁 File from {user.full_name} ({date}) [{category}]"
                     )
                 except Exception:
                     pass
 
 
-async def handle_incoming_data(user, ids, context, update_msg, file_info=None):
+async def handle_incoming_data(user, ids, category, context, update_msg, file_info=None):
     min_limit = DATA["settings"]["min_ids_limit"]
     if len(ids) < min_limit:
         await update_msg.reply_text(
@@ -414,6 +537,7 @@ async def handle_incoming_data(user, ids, context, update_msg, file_info=None):
             "user_id": user.id,
             "full_name": user.full_name,
             "ids": ids,
+            "category": category,
             "file_info": file_info
         }
         save_db()
@@ -425,6 +549,7 @@ async def handle_incoming_data(user, ids, context, update_msg, file_info=None):
             "<b>🔔 NEW SUBMISSION PENDING</b>\n\n"
             f"👤 <b>User:</b> {admin_preview_name}\n"
             f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
+            f"🏷️ <b>Category:</b> {category}\n"
             f"📥 <b>Total IDs:</b> <code>{len(ids)}</code>\n"
             f"🟢 <b>New IDs:</b> <code>{temp_new}</code>\n"
             f"♻️ <b>Duplicate IDs:</b> <code>{temp_dup}</code>\n\n"
@@ -447,51 +572,109 @@ async def handle_incoming_data(user, ids, context, update_msg, file_info=None):
             print("Failed to send notification to admin:", e)
 
         await update_msg.reply_text(
-            f"⏳ আপনার পাঠানো <code>{len(ids)}</code> টি আইডি জমা হয়েছে এবং অ্যাডমিনের অনুমোদনের অপেক্ষায় আছে।",
+            f"⏳ আপনার পাঠানো <code>{len(ids)}</code> টি আইডি [{category}] জমা হয়েছে এবং অ্যাডমিনের অনুমোদনের অপেক্ষায় আছে।",
             parse_mode="HTML"
         )
     else:
-        await process_valid_submission(user, ids, context, update_msg, file_info)
+        await process_valid_submission(user, ids, category, context, update_msg, file_info)
 
 
 async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not is_admin(user.id):
-        return False
-
     waiting = context.user_data.get("waiting_for")
     if not waiting:
         return False
 
     text = update.effective_message.text.strip()
 
+    if waiting == "user_enter_pay_num":
+        context.user_data["waiting_for"] = None
+        selected_method = context.user_data.get("selected_pay_method", "bKash")
+        uid_str = str(user.id)
+        
+        if uid_str not in DATA["user_payment_details"] or not isinstance(DATA["user_payment_details"][uid_str], dict):
+            DATA["user_payment_details"][uid_str] = {}
+            
+        DATA["user_payment_details"][uid_str][selected_method] = text
+        save_db()
+        await update.effective_message.reply_text(f"✅ আপনার <b>{selected_method}</b> নম্বর সফলভাবে সেভ করা হয়েছে: <code>{text}</code>", parse_mode="HTML")
+        return True
+
+    if waiting == "user_support_msg":
+        context.user_data["waiting_for"] = None
+        admin_id = DATA["settings"]["admin_id"]
+        
+        supp_text = (
+            "<b>📩 NEW SUPPORT TICKET RECEIVED</b>\n\n"
+            f"👤 <b>Name:</b> {user.full_name}\n"
+            f"🆔 <b>User ID:</b> <code>{user.id}</code>\n\n"
+            f"<b>💬 Message:</b>\n{text}"
+        )
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=supp_text, parse_mode="HTML")
+            await update.effective_message.reply_text("✅ আপনার মেসেজটি অ্যাডমিনের কাছে সফলভাবে পাঠানো হয়েছে। অতি শীঘ্রই উত্তর পেয়ে যাবেন।")
+        except Exception as e:
+            await update.effective_message.reply_text(f"🚫 মেসেজ পাঠানো সম্ভব হয়নি: {e}")
+        return True
+
+    if not is_admin(user.id):
+        return False
+
     if waiting == "broadcast_message":
         context.user_data["waiting_for"] = None
+        mode = context.user_data.get("broadcast_mode", "all")
         all_user_ids = set()
-        for d_val in DATA["days"].values():
-            for uid in d_val["members"].keys():
-                all_user_ids.add(int(uid))
+
+        if mode == "unpaid":
+            for d_val in DATA["days"].values():
+                for uid, mem in d_val["members"].items():
+                    if mem["received"] > 0 and get_user_payment_status(uid, today()) == "Unpaid":
+                        all_user_ids.add(int(uid))
+        else:
+            for d_val in DATA["days"].values():
+                for uid in d_val["members"].keys():
+                    all_user_ids.add(int(uid))
 
         if not all_user_ids:
-            await update.effective_message.reply_text("📭 ব্রডকাস্ট পাঠানোর মতো কোনো রেজিস্টার্ড মেম্বার নেই।")
+            await update.effective_message.reply_text("📭 এই ফিল্টারে কোনো মেম্বার পাওয়া যায়নি।")
             return True
 
         success_count = 0
         fail_count = 0
+        success_users = []
+        fail_users = []
         broadcast_text = f"📢 <b>ADMIN ANNOUNCEMENT</b>\n\n{text}"
 
         for uid in all_user_ids:
+            u_name = "User"
+            for d_val in DATA["days"].values():
+                if str(uid) in d_val["members"]:
+                    u_name = d_val["members"][str(uid)]["name"]
+                    break
+
             try:
                 await context.bot.send_message(chat_id=uid, text=broadcast_text, parse_mode="HTML")
+                success_users.append(f"• {u_name} (<code>{uid}</code>)")
                 success_count += 1
                 await asyncio.sleep(0.05)
             except Exception:
+                fail_users.append(f"• {u_name} (<code>{uid}</code>)")
                 fail_count += 1
+
+        success_list_str = "\n".join(success_users[:25]) if success_users else "কেউ নেই"
+        if len(success_users) > 25:
+            success_list_str += f"\n... এবং আরও {len(success_users) - 25} জন"
+
+        fail_list_str = "\n".join(fail_users[:25]) if fail_users else "কেউ নেই"
+        if len(fail_users) > 25:
+            fail_list_str += f"\n... এবং আরও {len(fail_users) - 25} জন"
 
         await update.effective_message.reply_text(
             f"✅ <b>ব্রডকাস্ট সম্পন্ন হয়েছে!</b>\n\n"
             f"🟢 সফলভাবে পাঠানো হয়েছে: <code>{success_count}</code> জনের কাছে\n"
-            f"🔴 ব্যর্থ হয়েছে: <code>{fail_count}</code> জন",
+            f"<b>সফল ব্যবহারকারীগণ:</b>\n{success_list_str}\n\n"
+            f"🔴 ব্যর্থ হয়েছে: <code>{fail_count}</code> জন\n"
+            f"<b>ব্যর্থ ব্যবহারকারীগণ:</b>\n{fail_list_str}",
             parse_mode="HTML"
         )
         return True
@@ -506,7 +689,6 @@ async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         target_uid = int(target_uid_str)
 
-        # যদি অ্যাডমিন একই মেসেজে ID এবং কথা লিখে পাঠায় (যেমন: 8114489614 Hi)
         if len(parts) > 1:
             context.user_data["waiting_for"] = None
             msg_text = parts[1]
@@ -556,52 +738,172 @@ async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         for d_date, d_data in DATA["days"].items():
             for bad_id in raw_ids:
-                if bad_id in d_data["ids"]:
-                    d_data["ids"].remove(bad_id)
-                    found_count += 1
+                for uid, mem in d_data["members"].items():
+                    mem.setdefault("rejected", 0)
+                    mem.setdefault("rejected_ids", [])
 
-                    for uid, mem in d_data["members"].items():
-                        mem.setdefault("rejected", 0)
-                        mem.setdefault("rejected_ids", [])
-
-                        if bad_id in mem["all_ids"]:
-                            mem["all_ids"].remove(bad_id)
+                    if bad_id in mem["all_ids"]:
+                        found_count += 1
+                        
+                        if bad_id in mem["new_ids"]:
+                            mem["new_ids"].remove(bad_id)
+                            mem["new"] = max(0, mem["new"] - 1)
                             
-                            if bad_id in mem["new_ids"]:
-                                mem["new_ids"].remove(bad_id)
-                                mem["new"] = max(0, mem["new"] - 1)
-                            elif bad_id in mem["duplicate_ids"]:
-                                mem["duplicate_ids"].remove(bad_id)
-                                mem["duplicate"] = max(0, mem["duplicate"] - 1)
+                            if mem.get("only_uid_count", 0) > 0:
+                                mem["only_uid_count"] -= 1
+                            elif mem.get("page_uid_count", 0) > 0:
+                                mem["page_uid_count"] -= 1
 
+                        elif bad_id in mem["duplicate_ids"]:
+                            mem["duplicate_ids"].remove(bad_id)
+                            mem["duplicate"] = max(0, mem["duplicate"] - 1)
+
+                        if bad_id not in mem["rejected_ids"]:
                             mem["rejected"] += 1
                             mem["rejected_ids"].append(bad_id)
 
-                            user_rejected_map.setdefault(uid, []).append(bad_id)
+                        user_rejected_map.setdefault(uid, []).append(bad_id)
 
         save_db()
 
+        member_blocks = []
         for target_uid, bad_list in user_rejected_map.items():
+            mem_name = DATA["days"][today()]["members"].get(target_uid, {}).get("name", "Member")
+            
+            tree_ids = []
+            for idx, b_id in enumerate(bad_list):
+                prefix = "└" if idx == len(bad_list) - 1 else "├"
+                tree_ids.append(f"{prefix} 🆔 <code>{b_id}</code>")
+
+            tree_str = "\n".join(tree_ids)
+            member_blocks.append(f"👤 <b>Name:</b> <a href='tg://user?id={target_uid}'>{mem_name}</a>\n{tree_str}")
+
             try:
                 formatted_bad_list = "\n".join([f"<code>{i}</code>" for i in bad_list])
                 await context.bot.send_message(
                     chat_id=int(target_uid),
                     text=(
-                        f"🚫 <b>আপনার পাঠানো নিচের <code>{len(bad_list)}</code> টি আইডি রিজেক্ট/নষ্ট হয়েছে:</b>\n\n"
+                        f"🚫 <b>আপনার পাঠানো নিচের <code>{len(bad_list)}</code> টি আইডি রিজেক্ট করা হয়েছে:</b>\n\n"
                         + formatted_bad_list +
-                        "\n\n⚠️ আপনার রিজেক্ট স্ট্যাটাসে এগুলো যুক্ত করা হয়েছে।"
+                        "\n\n⚠️ আপনার ব্যালেন্স ও স্ট্যাটাস থেকে এটার মূল্য মাইনাস করা হয়েছে।"
                     ),
                     parse_mode="HTML"
                 )
             except Exception as e:
                 print(f"User Notification Error ({target_uid}):", e)
 
+        details_msg = "\n\n".join(member_blocks) if member_blocks else "কোনো মেম্বারের ডাটাবেজে রেকর্ড পাওয়া যায়নি।"
+
         await update.effective_message.reply_text(
             f"✅ <b>প্রসেসিং সম্পন্ন হয়েছে!</b>\n\n"
-            f"📥 মোট রিজেক্ট আইডি: <code>{len(raw_ids)}</code>\n"
-            f"🔍 ডাটাবেজে পাওয়া গেছে: <code>{found_count}</code> টি\n"
-            f"👥 সংশ্লিষ্ট মেম্বারদের কাছে মেসেজ পাঠানো হয়েছে এবং রিজেক্ট কাউন্টার আপডেট করা হয়েছে।",
+            f"📥 মোট সাবমিট রিজেক্ট আইডি: <code>{len(raw_ids)}</code> টি\n"
+            f"🔍 ডাটাবেজে পাওয়া গেছে: <code>{found_count}</code> টি\n\n"
+            f"<b>📋 মেম্বার ভিত্তিক রিজেক্টের বিবরণ:</b>\n\n{details_msg}",
             parse_mode="HTML"
+        )
+        return True
+
+    elif waiting == "set_price_only":
+        context.user_data["waiting_for"] = None
+        try:
+            val = float(text)
+            DATA["settings"]["price_only_uid"] = val
+            save_db()
+            await update.effective_message.reply_text(f"🟢 <b>ONLY UID</b> এর প্রাইস সেট করা হয়েছে: <code>{val} BDT</code>", parse_mode="HTML")
+        except ValueError:
+            await update.effective_message.reply_text("🔴 সঠিক সংখ্যা বা দশমিক লিখুন।")
+        return True
+
+    elif waiting == "set_price_page":
+        context.user_data["waiting_for"] = None
+        try:
+            val = float(text)
+            DATA["settings"]["price_page_uid"] = val
+            save_db()
+            await update.effective_message.reply_text(f"🟢 <b>PAGE UID</b> এর প্রাইস সেট করা হয়েছে: <code>{val} BDT</code>", parse_mode="HTML")
+        except ValueError:
+            await update.effective_message.reply_text("🔴 সঠিক সংখ্যা বা দশমিক লিখুন।")
+        return True
+
+    elif waiting == "set_work_schedule_time":
+        context.user_data["waiting_for"] = None
+        parts = text.split("-")
+        if len(parts) == 2:
+            DATA["settings"]["start_time"] = parts[0].strip()
+            DATA["settings"]["end_time"] = parts[1].strip()
+            save_db()
+            await update.effective_message.reply_text(f"🟢 কাজের সময়সীমা আপডেট করা হয়েছে: <code>{parts[0].strip()} - {parts[1].strip()}</code>", parse_mode="HTML")
+        else:
+            await update.effective_message.reply_text("🔴 সঠিক ফরম্যাটে সময় লিখুন (যেমন: 10:00-22:00)।")
+        return True
+
+    elif waiting == "set_pay_template":
+        context.user_data["waiting_for"] = None
+        DATA["settings"]["payment_msg_template"] = text
+        save_db()
+        await update.effective_message.reply_text("🟢 পেমেন্ট মেসেজ টেমপ্লেট আপডেট করা হয়েছে।", parse_mode="HTML")
+        return True
+
+    elif waiting == "view_custom_date":
+        context.user_data["waiting_for"] = None
+        req_date = text
+        day_data = DATA["days"].get(req_date)
+        if not day_data or not day_data["members"]:
+            await update.effective_message.reply_text(f"📭 <code>{req_date}</code> তারিখে কোনো সাবমিশন পাওয়া যায়নি।", parse_mode="HTML")
+            return True
+
+        lines = [f"<b>📊 SUBMISSION REPORT FOR: {req_date}</b>\n"]
+        total_r = total_n = total_d = total_rej = 0
+        for uid, mem in day_data["members"].items():
+            if mem["received"] > 0:
+                earned = calculate_member_earned(mem)
+                pay_st = get_user_payment_status(uid, req_date)
+                total_r += mem["received"]
+                total_n += mem["new"]
+                total_d += mem["duplicate"]
+                rej_c = mem.get("rejected", 0)
+                total_rej += rej_c
+                lines.extend([
+                    f"👤 <b>Name:</b> <a href='tg://user?id={uid}'>{mem['name']}</a>",
+                    f"  📥 Total: <code>{mem['received']}</code> | 🟢 New: <code>{mem['new']}</code> (Only: {mem.get('only_uid_count',0)}, Page: {mem.get('page_uid_count',0)}) | ♻️ Dup: <code>{mem['duplicate']}</code> | 🚫 Rej: <code>{rej_c}</code>",
+                    f"  💰 Earned: <code>{earned:.2f} BDT</code> ({pay_st})\n"
+                ])
+
+        lines.extend([
+            "━━━━━━━━━━━━━━━━━━",
+            f"📦 <b>Total Received:</b> <code>{total_r}</code> | 🟢 <b>New:</b> <code>{total_n}</code>"
+        ])
+        await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+        return True
+
+    elif waiting == "export_custom_date":
+        context.user_data["waiting_for"] = None
+        req_date = text
+        day_data = DATA["days"].get(req_date)
+        if not day_data or not day_data["members"]:
+            await update.effective_message.reply_text(f"📭 <code>{req_date}</code> তারিখে কোনো ডাটা নেই।", parse_mode="HTML")
+            return True
+
+        def gen_excel():
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = req_date
+            ws.append(["Date", "User ID", "Name", "Received", "New", "Only UID", "Page UID", "Duplicate", "Rejected", "Earned BDT", "Payment Status"])
+            for u_id, mem in day_data["members"].items():
+                if mem["received"] > 0:
+                    earned = calculate_member_earned(mem)
+                    pay_st = get_user_payment_status(u_id, req_date)
+                    ws.append([req_date, u_id, mem["name"], mem["received"], mem["new"], mem.get("only_uid_count",0), mem.get("page_uid_count",0), mem["duplicate"], mem.get("rejected", 0), earned, pay_st])
+            bio = io.BytesIO()
+            wb.save(bio)
+            bio.seek(0)
+            return bio
+
+        excel_bio = await asyncio.to_thread(gen_excel)
+        await update.effective_message.reply_document(
+            document=excel_bio,
+            filename=f"report_{req_date}.xlsx",
+            caption=f"📊 Report for {req_date}"
         )
         return True
 
@@ -617,7 +919,9 @@ async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE
             if mem:
                 found = True
                 rej_c = mem.get("rejected", 0)
-                lines.append(f"📅 <code>{d_date}</code>\n  📥 Total: <code>{mem['received']}</code> | 🟢 New: <code>{mem['new']}</code>\n  ♻️ Dup: <code>{mem['duplicate']}</code> | 🚫 Rej: <code>{rej_c}</code>\n")
+                earned = calculate_member_earned(mem)
+                pay_st = get_user_payment_status(target_uid, d_date)
+                lines.append(f"📅 <code>{d_date}</code>\n  📥 Total: <code>{mem['received']}</code> | 🟢 New: <code>{mem['new']}</code> (Only: {mem.get('only_uid_count',0)}, Page: {mem.get('page_uid_count',0)})\n  ♻️ Dup: <code>{mem['duplicate']}</code> | 🚫 Rej: <code>{rej_c}</code>\n  💰 Earned: <code>{earned:.2f} BDT</code> ({pay_st})\n")
 
         if found:
             await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -638,7 +942,6 @@ async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if input_val in DATA["days"][d_date]["members"]:
                     del DATA["days"][d_date]["members"][input_val]
                     deleted = True
-            
             if deleted:
                 save_db()
                 await update.effective_message.reply_text(f"🗑️ ইউজার <code>{input_val}</code> এর সমস্ত হিস্ট্রি ডিলিট করা হয়েছে।", parse_mode="HTML")
@@ -711,6 +1014,20 @@ async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE
     return False
 
 
+async def check_payment_set(user, update_msg):
+    uid_str = str(user.id)
+    pay_info = DATA["user_payment_details"].get(uid_str)
+    if not pay_info or not isinstance(pay_info, dict) or not any(pay_info.values()):
+        await update_msg.reply_text(
+            "⚠️ <b>পেমেন্ট নম্বর সেট করা হয়নি!</b>\n\n"
+            "আইডি জমা দেওয়ার আগে দয়া করে আপনার পেমেন্ট নম্বর সেট করুন।\n"
+            "👉 পেমেন্ট নম্বর সেট করতে <b>/setpayment</b> কমান্ড দিন।",
+            parse_mode="HTML"
+        )
+        return False
+    return True
+
+
 async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in DATA["banned_users"]:
@@ -728,8 +1045,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin(update, context)
         return
 
-    # অ্যাডমিন যদি কোনো কমান্ড প্রসেস করতে থাকে তা আগে দেখা হবে
-    if is_admin(user.id) and context.user_data.get("waiting_for"):
+    if context.user_data.get("waiting_for"):
         handled = await handle_admin_inputs(update, context)
         if handled:
             return
@@ -738,7 +1054,40 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ids:
         return
 
-    await handle_incoming_data(user, ids, context, update.effective_message)
+    if not is_admin(user.id):
+        if not await check_payment_set(user, update.effective_message):
+            return
+
+        if not is_work_time():
+            st = DATA['settings'].get('start_time', '10:00')
+            et = DATA['settings'].get('end_time', '22:00')
+            await update.effective_message.reply_text(
+                f"🚫 <b>কাজের সময়সূচী বন্ধ রয়েছে!</b>\n\n⏰ <b>কাজের সময়:</b> {st} থেকে {et} পর্যন্ত।\n⌛ নির্ধারিত সময়ে আইডি জমা দিন।",
+                parse_mode="HTML"
+            )
+            return
+
+    await ask_category_selection(update, ids)
+
+
+async def ask_category_selection(update: Update, ids, file_info=None):
+    sub_temp_id = f"temp_{update.effective_user.id}_{int(datetime.now().timestamp())}"
+    context_map = getattr(ask_category_selection, "temp_submissions", {})
+    context_map[sub_temp_id] = {"ids": ids, "file_info": file_info}
+    ask_category_selection.temp_submissions = context_map
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🆔 ONLY UID", callback_data=f"cat_sel_ONLY_{sub_temp_id}"),
+            InlineKeyboardButton("📄 PAGE UID", callback_data=f"cat_sel_PAGE_{sub_temp_id}")
+        ]
+    ]
+
+    await update.effective_message.reply_text(
+        f"🏷️ আপনি <code>{len(ids)}</code> টি আইডি পাঠিয়েছেন। অনুগ্রহ করে ক্যাটাগরি সিলেক্ট করুন:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
 
 
 def parse_xlsx_in_thread(file_bytes):
@@ -774,6 +1123,19 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("🚫 শুধু <code>.xlsx</code> ফরম্যাটের ফাইল দিন।", parse_mode="HTML")
         return
 
+    if not is_admin(user.id):
+        if not await check_payment_set(user, update.effective_message):
+            return
+
+        if not is_work_time():
+            st = DATA['settings'].get('start_time', '10:00')
+            et = DATA['settings'].get('end_time', '22:00')
+            await update.effective_message.reply_text(
+                f"🚫 <b>কাজের সময়সূচী বন্ধ রয়েছে!</b>\n\n⏰ <b>কাজের সময়:</b> {st} থেকে {et} পর্যন্ত।\n⌛ নির্ধারিত সময়ে আইডি জমা দিন।",
+                parse_mode="HTML"
+            )
+            return
+
     try:
         file = await context.bot.get_file(document.file_id)
         file_bytes = await file.download_as_bytearray()
@@ -782,7 +1144,7 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if extracted_ids:
             file_info = {"document_id": document.file_id}
-            await handle_incoming_data(user, extracted_ids, context, update.effective_message, file_info)
+            await ask_category_selection(update, extracted_ids, file_info)
         else:
             await update.effective_message.reply_text("🚫 এক্সেল ফাইলের ভেতর কোনো সংখ্যাসূচক আইডি পাওয়া যায়নি।")
 
@@ -795,6 +1157,7 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    context.user_data.clear()
 
     if not is_admin(user.id):
         await update.effective_message.reply_text("🚫 আপনার এই কমান্ডটি ব্যবহার করার অনুমতি নেই।")
@@ -802,6 +1165,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("📊 Reports & Summary", callback_data="cat_reports")],
+        [InlineKeyboardButton("💵 Price & Payment Control", callback_data="cat_pricing")],
         [InlineKeyboardButton("🛠️ ID & Data Management", callback_data="cat_id_mgt")],
         [InlineKeyboardButton("⚙️ Bot System Settings", callback_data="cat_sys_settings")],
         [InlineKeyboardButton("👥 User & Receiver Control", callback_data="cat_user_control")]
@@ -815,18 +1179,81 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
+async def render_unpaid_list(query_or_msg):
+    unpaid_buttons = []
+    for d_date, d_val in DATA["days"].items():
+        for uid, mem in d_val["members"].items():
+            if mem["received"] > 0 and get_user_payment_status(uid, d_date) == "Unpaid":
+                btn_text = f"👤 {mem['name']} | 📅 {d_date} | 💰 {calculate_member_earned(mem):.2f} BDT"
+                unpaid_buttons.append([InlineKeyboardButton(btn_text, callback_data=f"paydet_{uid}_{d_date}")])
+
+    if not unpaid_buttons:
+        txt = "🎉 বর্তমানে কোনো Unpaid পেমেন্ট বাকি নেই!"
+        if hasattr(query_or_msg, 'edit_message_text'):
+            await query_or_msg.edit_message_text(txt, parse_mode="HTML")
+        else:
+            await query_or_msg.reply_text(txt, parse_mode="HTML")
+        return
+
+    unpaid_buttons.append([InlineKeyboardButton("🔙 Back", callback_data="cat_pricing")])
+    txt = "💳 <b>SMART UNPAID PAYMENT LIST</b>\n\nযে ইউজারের পেমেন্ট ডিটেইলস দেখতে চান তার ওপর ক্লিক করুন:"
+    if hasattr(query_or_msg, 'edit_message_text'):
+        await query_or_msg.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(unpaid_buttons), parse_mode="HTML")
+    else:
+        await query_or_msg.reply_text(txt, reply_markup=InlineKeyboardMarkup(unpaid_buttons), parse_mode="HTML")
+
+
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
 
-    if not is_admin(user.id):
-        await query.answer("Access Denied!", show_alert=True)
-        return
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
-    await query.answer()
     data = query.data
 
-    # --- MAIN MENU NAVIGATIONS ---
+    if data.startswith("setlang_"):
+        lang_code = data.replace("setlang_", "")
+        DATA["user_languages"][str(user.id)] = lang_code
+        save_db()
+        msg_txt = "✅ ভাষা সফলভাবে পরিবর্তন করা হয়েছে!" if lang_code == "bn" else "✅ Language updated successfully!"
+        await query.edit_message_text(msg_txt)
+        return
+
+    if data.startswith("setpaym_"):
+        method = data.replace("setpaym_", "")
+        context.user_data["selected_pay_method"] = method
+        context.user_data["waiting_for"] = "user_enter_pay_num"
+        await query.edit_message_text(f"💳 <b>{method}</b> সিলেক্ট করেছেন। এবার আপনার {method} নম্বরটি লিখে পাঠান:", parse_mode="HTML")
+        return
+
+    if data.startswith("cat_sel_"):
+        parts = data.split("_", 3)
+        cat_type = parts[2]
+        sub_temp_id = parts[3]
+        
+        category_name = "ONLY UID" if cat_type == "ONLY" else "PAGE UID"
+
+        context_map = getattr(ask_category_selection, "temp_submissions", {})
+        temp_data = context_map.get(sub_temp_id)
+
+        if not temp_data:
+            await query.edit_message_text("⚠️ অনুরোধের সময়সীমা পার হয়ে গেছে। পুনরায় পাঠাক।")
+            return
+
+        del context_map[sub_temp_id]
+        
+        await query.edit_message_text(f"✅ Selected Category: <b>{category_name}</b>", parse_mode="HTML")
+        await handle_incoming_data(user, temp_data["ids"], category_name, context, query.message, temp_data["file_info"])
+        return
+
+    if not is_admin(user.id):
+        return
+
+    context.user_data.clear()
+
     if data == "cat_main":
         await admin(update, context)
         return
@@ -834,12 +1261,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "cat_reports":
         keyboard = [
             [InlineKeyboardButton("👥 Today Member Summary", callback_data="adm_member_summary")],
-            [InlineKeyboardButton("📋 Today All Received IDs", callback_data="adm_all_ids_list")],
+            [InlineKeyboardButton("📋 Today All Received IDs", callback_data="adm_all_ids_filter")],
+            [InlineKeyboardButton("📅 View Custom Date Report", callback_data="adm_view_custom_date")],
             [InlineKeyboardButton("👤 View Specific User History", callback_data="adm_user_hist")],
             [InlineKeyboardButton("👥 All Registered Members", callback_data="adm_all_members")],
             [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="cat_main")]
         ]
         await query.edit_message_text("📊 <b>REPORTS & SUMMARY MENU</b>\n\nপ্রয়োজনীয় রিপোর্ট বেছে নিন:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return
+
+    if data == "cat_pricing":
+        p_only = DATA["settings"].get("price_only_uid", 0.0)
+        p_page = DATA["settings"].get("price_page_uid", 0.0)
+        keyboard = [
+            [InlineKeyboardButton(f"✏️ Set ONLY UID Price (Cur: {p_only} BDT)", callback_data="adm_set_p_only")],
+            [InlineKeyboardButton(f"✏️ Set PAGE UID Price (Cur: {p_page} BDT)", callback_data="adm_set_p_page")],
+            [InlineKeyboardButton("💳 Smart Unpaid Payment List", callback_data="adm_smart_unpaid")],
+            [InlineKeyboardButton("✉️ Edit Payment Success Msg", callback_data="adm_edit_pay_msg")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="cat_main")]
+        ]
+        await query.edit_message_text("💵 <b>PRICE & PAYMENT CONTROL</b>\n\nদাম ও পেমেন্ট আপডেট করুন:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return
 
     if data == "cat_id_mgt":
@@ -857,11 +1298,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_icon = "🔴 OFF" if s["maintenance"] else "🟢 ON"
         approval_icon = "🟢 ON" if s["approval_mode"] else "⚡ Direct"
         mode_icon = "🔄 All-Time" if s["duplicate_mode"] == "all_time" else "📅 Daily"
+        sch_icon = "🟢 ON" if s.get("work_schedule_enabled") else "🔴 OFF"
 
         keyboard = [
             [InlineKeyboardButton(f"🛡️ Approval Mode: {approval_icon}", callback_data="adm_toggle_approval")],
             [InlineKeyboardButton(f"🛠️ Bot Status: {status_icon}", callback_data="adm_toggle_maint")],
             [InlineKeyboardButton(f"⚙️ Dup Check Mode: {mode_icon}", callback_data="adm_toggle_mode")],
+            [InlineKeyboardButton(f"⏰ Work Schedule: {sch_icon}", callback_data="adm_toggle_schedule")],
+            [InlineKeyboardButton("🕒 Set Work Hours", callback_data="adm_set_schedule_time")],
             [InlineKeyboardButton("🔢 Min Limit", callback_data="adm_limit"), InlineKeyboardButton("📢 Channel Link", callback_data="adm_chnl")],
             [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="cat_main")]
         ]
@@ -871,17 +1315,129 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "cat_user_control":
         keyboard = [
             [InlineKeyboardButton("➕ Add Receiver", callback_data="adm_add_rcv"), InlineKeyboardButton("➖ Remove Receiver", callback_data="adm_rem_rcv")],
-            [InlineKeyboardButton("📢 Broadcast to All Members", callback_data="adm_broadcast")],
+            [InlineKeyboardButton("📢 Broadcast (All Users)", callback_data="adm_broadcast_all")],
+            [InlineKeyboardButton("📢 Broadcast (Unpaid Only)", callback_data="adm_broadcast_unpaid")],
             [InlineKeyboardButton("✉️ Message Specific User", callback_data="adm_msg_user")],
             [InlineKeyboardButton("🚫 Ban / Unban User", callback_data="adm_ban")],
-            [InlineKeyboardButton("📥 Export Excel Report", callback_data="adm_export")],
+            [InlineKeyboardButton("💾 Backup Database File", callback_data="adm_backup_db")],
+            [InlineKeyboardButton("📥 Export Full Excel Report", callback_data="adm_export")],
+            [InlineKeyboardButton("📅 Export Specific Date Excel", callback_data="adm_export_custom_date_btn")],
             [InlineKeyboardButton("📋 View Full System Config", callback_data="adm_view")],
             [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="cat_main")]
         ]
         await query.edit_message_text("👥 <b>USER & RECEIVER CONTROL</b>\n\nরিসিভার চ্যানেল বা ইউজার নিয়ন্ত্রণ করুন:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return
 
-    # --- ACTIONS & SUB-FUNCTIONS ---
+    if data == "adm_backup_db":
+        try:
+            with open(DB_FILE, "rb") as f:
+                await query.message.reply_document(
+                    document=f,
+                    filename=f"bot_data_backup_{today()}.json",
+                    caption="💾 <b>আপনার বটের সম্পূর্ণ ডাটাবেজ ব্যাকআপ ফাইল।</b>",
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            await query.message.reply_text(f"🚫 ব্যাকআপ নিতে সমস্যা হয়েছে: {e}")
+        return
+
+    if data == "adm_toggle_schedule":
+        DATA["settings"]["work_schedule_enabled"] = not DATA["settings"].get("work_schedule_enabled", False)
+        save_db()
+        st = "চালু" if DATA["settings"]["work_schedule_enabled"] else "বন্ধ"
+        await query.message.reply_text(f"🟢 কাজের সময়সূচী মোড এখন: <b>{st}</b>", parse_mode="HTML")
+        return
+
+    if data == "adm_set_schedule_time":
+        context.user_data["waiting_for"] = "set_work_schedule_time"
+        cur_s = DATA["settings"].get("start_time", "10:00")
+        cur_e = DATA["settings"].get("end_time", "22:00")
+        await query.message.reply_text(
+            f"🕒 <b>SET WORK HOURS</b>\n\nবর্তমান সময়: <code>{cur_s} - {cur_e}</code>\n\n"
+            "নতুন সময়সীমা HH:MM-HH:MM ফরম্যাটে লিখে পাঠান (যেমন: <code>10:00-22:00</code>):",
+            parse_mode="HTML"
+        )
+        return
+
+    if data == "adm_broadcast_all":
+        context.user_data["waiting_for"] = "broadcast_message"
+        context.user_data["broadcast_mode"] = "all"
+        await query.message.reply_text("📢 <b>BROADCAST TO ALL MEMBERS</b>\n\nসকল রেজিস্টার্ড মেম্বারদের জন্য মেসেজটি লিখে পাঠান:", parse_mode="HTML")
+        return
+
+    if data == "adm_broadcast_unpaid":
+        context.user_data["waiting_for"] = "broadcast_message"
+        context.user_data["broadcast_mode"] = "unpaid"
+        await query.message.reply_text("📢 <b>BROADCAST TO UNPAID MEMBERS ONLY</b>\n\nযাদের পেমেন্ট বাকি আছে তাদের জন্য মেসেজটি লিখে পাঠান:", parse_mode="HTML")
+        return
+
+    if data == "adm_smart_unpaid":
+        await render_unpaid_list(query)
+        return
+
+    if data.startswith("paydet_"):
+        _, p_uid, p_date = data.split("_", 2)
+        day_data = DATA["days"].get(p_date)
+        if not day_data or p_uid not in day_data["members"]:
+            await query.message.reply_text("🔴 মেম্বারের ডাটা পাওয়া যায়নি।")
+            return
+
+        mem = day_data["members"][p_uid]
+        earned = calculate_member_earned(mem)
+        
+        pay_details = DATA["user_payment_details"].get(p_uid, {})
+        if isinstance(pay_details, dict) and pay_details:
+            pay_lines = [f"  • {m}: <code>{n}</code>" for m, n in pay_details.items()]
+            pay_info = "\n" + "\n".join(pay_lines)
+        else:
+            pay_info = " <code>নম্বর সেট করা হয়নি</code>"
+
+        rej_c = mem.get("rejected", 0)
+        only_c = mem.get("only_uid_count", 0)
+        page_c = mem.get("page_uid_count", 0)
+
+        detail_text = (
+            f"👤 <b>Name:</b> {mem['name']}\n"
+            f"🆔 <b>User ID:</b> <code>{p_uid}</code>\n"
+            f"📅 <b>Date:</b> <code>{p_date}</code>\n"
+            f"📱 <b>Payment Numbers:</b>{pay_info}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📥 Total Received: <code>{mem['received']}</code>\n"
+            f"🟢 New: <code>{mem['new']}</code> (Only: {only_c}, Page: {page_c})\n"
+            f"♻️ Duplicate: <code>{mem['duplicate']}</code>\n"
+            f"🚫 Rejected: <code>{rej_c}</code>\n"
+            f"💰 <b>Net Earned:</b> <code>{earned:.2f} BDT</code>\n"
+            f"💳 <b>Status:</b> Unpaid"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("✅ Mark as Paid", callback_data=f"do_paid_{p_uid}_{p_date}")],
+            [InlineKeyboardButton("🔙 Back to Unpaid List", callback_data="adm_smart_unpaid")]
+        ]
+        await query.edit_message_text(detail_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return
+
+    if data.startswith("do_paid_"):
+        _, _, p_uid, p_date = data.split("_", 3)
+        day_data = DATA["days"].get(p_date)
+        if day_data and p_uid in day_data["members"]:
+            mem = day_data["members"][p_uid]
+            earned = calculate_member_earned(mem)
+            DATA["payments"][f"{p_uid}_{p_date}"] = "Paid"
+            save_db()
+
+            template = DATA["settings"].get("payment_msg_template", "🎉 <b>আপনার পেমেন্ট সফলভাবে পরিশোধ করা হয়েছে!</b>\n\n💵 <b>পরিশোধিত অর্থ:</b> {amount} BDT")
+            msg_to_send = template.replace("{amount}", f"{earned:.2f}").replace("{date}", p_date)
+
+            try:
+                await context.bot.send_message(chat_id=int(p_uid), text=msg_to_send, parse_mode="HTML")
+            except Exception as e:
+                print("Payment Notif Failed:", e)
+
+            await query.answer("✅ পেমেন্ট সফলভাবে PAID হিসেবে মার্ক করা হয়েছে!", show_alert=True)
+            await render_unpaid_list(query)
+        return
+
     if data == "adm_member_summary":
         date = today()
         day_data = DATA["days"].get(date)
@@ -890,43 +1446,59 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"📅 <b>Date:</b> <code>{date}</code>\n\n📭 আজকের দিনে এখনো কোনো আইডি জমা পড়েনি।", parse_mode="HTML")
             return
 
-        lines = [
+        blocks = [
             "<b>📊 TODAY'S MEMBER SUMMARY</b>",
-            f"📅 <b>Date:</b> <code>{date}</code>\n",
-            "👥 <b>MEMBER-WISE BREAKDOWN:</b>"
+            f"📅 <b>Date:</b> <code>{date}</code>",
+            "━━━━━━━━━━━━━━━━━━━━\n"
         ]
 
-        total_day_received = 0
-        total_day_new = 0
-        total_day_dup = 0
-        total_day_rej = 0
+        total_day_received = total_day_new = total_day_dup = total_day_rej = 0
+        active_count = 0
 
         for uid, mem in day_data["members"].items():
-            adm_rep_name = f"<a href='tg://user?id={uid}'>{mem['name']}</a>"
-            total_day_received += mem['received']
-            total_day_new += mem['new']
-            total_day_dup += mem['duplicate']
-            rej_c = mem.get("rejected", 0)
-            total_day_rej += rej_c
+            if mem['received'] > 0:
+                active_count += 1
+                adm_rep_name = f"<a href='tg://user?id={uid}'>{mem['name']}</a>"
+                total_day_received += mem['received']
+                total_day_new += mem['new']
+                total_day_dup += mem['duplicate']
+                rej_c = mem.get("rejected", 0)
+                total_day_rej += rej_c
+                earned = calculate_member_earned(mem)
+                pay_st = get_user_payment_status(uid, date)
 
-            lines.extend([
-                f"👤 <b>Name:</b> {adm_rep_name}",
-                f"  📥 Total: <code>{mem['received']}</code> | 🟢 New: <code>{mem['new']}</code>",
-                f"  ♻️ Dup: <code>{mem['duplicate']}</code> | 🚫 Rej: <code>{rej_c}</code>\n"
-            ])
+                o_cnt = mem.get("only_uid_count", 0)
+                p_cnt = mem.get("page_uid_count", 0)
 
-        lines.extend([
-            "━━━━━━━━━━━━━━━━━━",
-            f"📦 <b>Today's Total Received:</b> <code>{total_day_received}</code>",
-            f"🟢 <b>Today's Total New:</b> <code>{total_day_new}</code>",
-            f"♻️ <b>Today's Total Duplicate:</b> <code>{total_day_dup}</code>",
+                m_block = (
+                    f"👤 <b>Name:</b> {adm_rep_name}\n"
+                    f"📥 Total Received: <code>{mem['received']}</code>\n"
+                    f"🟢 New IDs: <code>{mem['new']}</code> (Only: {o_cnt} | Page: {p_cnt})\n"
+                    f"♻️ Duplicate IDs: <code>{mem['duplicate']}</code>\n"
+                    f"🚫 Rejected IDs: <code>{rej_c}</code>\n"
+                    f"💰 Earned Amount: <code>{earned:.2f} BDT</code> ({pay_st})\n"
+                    f"────────────────────"
+                )
+                blocks.append(m_block)
+
+        if active_count == 0:
+            await query.message.reply_text(f"📅 <b>Date:</b> <code>{date}</code>\n\n📭 আজকের দিনে কেউ কোনো আইডি জমা দেয়নি।", parse_mode="HTML")
+            return
+
+        blocks.append(
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 <b>Today's Total Received:</b> <code>{total_day_received}</code>\n"
+            f"🟢 <b>Today's Total New:</b> <code>{total_day_new}</code>\n"
+            f"♻️ <b>Today's Total Duplicate:</b> <code>{total_day_dup}</code>\n"
             f"🚫 <b>Today's Total Rejected:</b> <code>{total_day_rej}</code>"
-        ])
+        )
         
-        await query.message.reply_text("\n".join(lines), parse_mode="HTML")
+        full_text = "\n".join(blocks)
+        for start_pos in range(0, len(full_text), 3500):
+            await query.message.reply_text(full_text[start_pos:start_pos + 3500], parse_mode="HTML")
         return
 
-    if data == "adm_all_ids_list":
+    if data == "adm_all_ids_filter":
         date = today()
         day_data = DATA["days"].get(date)
         
@@ -934,31 +1506,100 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"📅 <b>Date:</b> <code>{date}</code>\n\n📭 আজকের দিনে এখনো কোনো আইডি জমা পড়েনি।", parse_mode="HTML")
             return
 
-        all_ids_text = "\n".join(day_data["ids"])
-        
-        full_output = (
-            "<b>📋 TODAY'S ALL RECEIVED IDs</b>\n"
+        all_new_ids = []
+        all_rej_ids = []
+        for mem in day_data["members"].values():
+            all_new_ids.extend(mem.get("new_ids", []))
+            all_rej_ids.extend(mem.get("rejected_ids", []))
+
+        text_msg = (
+            "<b>📋 TODAY'S RECEIVED IDs MENU</b>\n"
             f"📅 <b>Date:</b> <code>{date}</code>\n"
-            f"📦 <b>Total Count:</b> <code>{len(day_data['ids'])}</code>\n\n"
-            f"<pre>{all_ids_text}</pre>"
+            f"📦 <b>Total Received:</b> <code>{len(day_data['ids'])}</code>\n\n"
+            f"🟢 <b>New IDs:</b> <code>{len(all_new_ids)}</code>\n"
+            f"🚫 <b>Rejected IDs:</b> <code>{len(all_rej_ids)}</code>\n\n"
+            "নিচের বাটন চেপে আপনার প্রয়োজনীয় আইডিগুলো দেখতে পাবেন:"
         )
 
         keyboard = [
-            [
-                InlineKeyboardButton(
-                    f"📋 {len(day_data['ids'])} টি আইডি কপি করুন", 
-                    copy_text=CopyTextButton(text=all_ids_text)
-                )
-            ]
+            [InlineKeyboardButton("🟢 View Only New IDs", callback_data="copy_ids_new")],
+            [InlineKeyboardButton("🚫 View Only Rejected IDs", callback_data="copy_ids_rej")],
+            [InlineKeyboardButton("📦 View All Received IDs", callback_data="copy_ids_all")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        for start_pos in range(0, len(full_output), 3500):
+        await query.message.reply_text(text_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return
+
+    if data in ("copy_ids_new", "copy_ids_rej", "copy_ids_all"):
+        date = today()
+        day_data = DATA["days"].get(date)
+        if not day_data:
+            await query.message.reply_text("📭 ডাটা পাওয়া যায়নি।")
+            return
+
+        target_ids = []
+        label = ""
+        if data == "copy_ids_new":
+            label = "NEW IDs"
+            for mem in day_data["members"].values():
+                target_ids.extend(mem.get("new_ids", []))
+        elif data == "copy_ids_rej":
+            label = "REJECTED IDs"
+            for mem in day_data["members"].values():
+                target_ids.extend(mem.get("rejected_ids", []))
+        else:
+            label = "ALL RECEIVED IDs"
+            target_ids = list(day_data["ids"])
+
+        if not target_ids:
+            await query.message.reply_text(f"📭 আজকের দিনে কোনো {label} পাওয়া যায়নি।")
+            return
+
+        all_ids_text = "\n".join(target_ids)
+        await query.message.reply_text(
+            f"<b>📋 TODAY'S {label}</b>\n"
+            f"📅 <b>Date:</b> <code>{date}</code>\n"
+            f"📦 <b>Total Count:</b> <code>{len(target_ids)}</code>\n\n"
+            "নিচে আইডিগুলোর তালিকা দেওয়া হলো:",
+            parse_mode="HTML"
+        )
+
+        for start_pos in range(0, len(all_ids_text), 3000):
+            chunk = all_ids_text[start_pos:start_pos + 3000]
             await query.message.reply_text(
-                full_output[start_pos:start_pos + 3500], 
-                reply_markup=reply_markup if start_pos == 0 else None,
+                f"<pre>{chunk}</pre>",
                 parse_mode="HTML"
             )
+        return
+
+    if data == "adm_set_p_only":
+        context.user_data["waiting_for"] = "set_price_only"
+        await query.message.reply_text("✏️ <b>ONLY UID</b> এর প্রতি নতুন আইডির প্রাইস (BDT) লিখে পাঠান (যেমন: 1.5):", parse_mode="HTML")
+        return
+
+    if data == "adm_set_p_page":
+        context.user_data["waiting_for"] = "set_price_page"
+        await query.message.reply_text("✏️ <b>PAGE UID</b> এর প্রতি নতুন আইডির প্রাইস (BDT) লিখে পাঠান (যেমন: 2.0):", parse_mode="HTML")
+        return
+
+    if data == "adm_edit_pay_msg":
+        context.user_data["waiting_for"] = "set_pay_template"
+        cur_tpl = DATA["settings"].get("payment_msg_template", "")
+        await query.message.reply_text(
+            f"✉️ <b>EDIT PAYMENT MESSAGE TEMPLATE</b>\n\n"
+            f"বর্তমান টেমপ্লেট:\n<code>{cur_tpl}</code>\n\n"
+            f"আপনার নতুন কাস্টম মেসেজ লিখে পাঠান। টাকা সংক্রান্ত স্থানে <code>{{amount}}</code> এবং তারিখের স্থানে <code>{{date}}</code> ট্যাগ ব্যবহার করুন।",
+            parse_mode="HTML"
+        )
+        return
+
+    if data == "adm_view_custom_date":
+        context.user_data["waiting_for"] = "view_custom_date"
+        await query.message.reply_text("📅 যে তারিখের রিপোর্ট দেখতে চান সেই তারিখটি YYYY-MM-DD ফরম্যাটে লিখুন (যেমন: <code>2026-10-18</code>):", parse_mode="HTML")
+        return
+
+    if data == "adm_export_custom_date_btn":
+        context.user_data["waiting_for"] = "export_custom_date"
+        await query.message.reply_text("📅 যে তারিখের এক্সেল রিপোর্ট ডাউনলোড করতে চান সেই তারিখটি YYYY-MM-DD ফরম্যাটে লিখুন (যেমন: <code>2026-10-18</code>):", parse_mode="HTML")
         return
 
     if data == "adm_reject_bad_ids":
@@ -987,61 +1628,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 self.full_name = name
 
         d_user = DummyUser(sub_data["user_id"], sub_data["full_name"])
-        
-        try:
-            user_obj = await context.bot.get_chat(sub_data["user_id"])
-            if user_obj:
-                d_user.full_name = user_obj.full_name or sub_data["full_name"]
-        except Exception:
-            pass
+        cat_type = sub_data.get("category", "ONLY UID")
 
-        # আইডিগুলো প্রসেস করার ফাংশন কল করা হলো
         await process_valid_submission(
             d_user,
             sub_data["ids"],
+            cat_type,
             context,
             query.message,
-            sub_data["file_info"]
+            sub_data.get("file_info")
         )
-
-        # সরাসরি ইউজারের ইনবক্সে সেই কাঙ্ক্ষিত সফলতার মেসেজ পাঠানোর লজিক
-        try:
-            # সাবমিশন অনুযায়ী হিসাব বের করা
-            date = today()
-            day = get_day(date)
-            mode = DATA["settings"]["duplicate_mode"]
-            if mode == "all_time":
-                all_existing_ids = set()
-                for d_key, d_val in DATA["days"].items():
-                    if d_key != date:
-                        all_existing_ids.update(d_val["ids"])
-                seen_today = all_existing_ids
-            else:
-                seen_today = set()
-                for i in day["ids"][:-len(sub_data["ids"])]:
-                    seen_today.add(i)
-
-            temp_new = 0
-            temp_dup = 0
-            for item in sub_data["ids"]:
-                if item in seen_today:
-                    temp_dup += 1
-                else:
-                    temp_new += 1
-                    seen_today.add(item)
-
-            await context.bot.send_message(
-                chat_id=sub_data["user_id"],
-                text=(
-                    f"🎉 <b>আপনার পাঠানো <code>{len(sub_data['ids'])}</code> টি আইডি প্রসেস করা হয়েছে!</b>\n\n"
-                    f"📥 Total Received: <code>{len(sub_data['ids'])}</code>\n"
-                    f"🟢 New Approved: <code>{temp_new}</code>\n"
-                    f"♻️ Duplicate Skipped: <code>{temp_dup}</code>"
-                ),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print("Failed to send success msg to user:", e)
 
         del DATA["pending_submissions"][sub_id]
         save_db()
@@ -1051,26 +1647,27 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
-        target_user_id = sub_data["user_id"]
-        total_ids_count = len(sub_data["ids"])
+
+    if data.startswith("rej_"):
+        sub_id = data.replace("rej_", "")
+        sub_data = DATA["pending_submissions"].get(sub_id)
+
+        if sub_data:
+            u_id = sub_data["user_id"]
+            try:
+                await context.bot.send_message(
+                    chat_id=u_id,
+                    text="🚫 <b>আপনার পাঠানো সাবমিশনটি অ্যাডমিন কর্তৃক বাতিল (Rejected) করা হয়েছে।</b>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+            del DATA["pending_submissions"][sub_id]
+            save_db()
 
         try:
-            await context.bot.send_message(
-                chat_id=target_user_id,
-                text=(
-                    f"🚫 <b>আপনার পাঠানো <code>{total_ids_count}</code> টি আইডি গ্রহণযোগ্য হয়নি (Rejected)।</b>\n\n"
-                    "অনুগ্রহ করে সঠিক আইডি যাচাই করে পুনরায় চেষ্টা করুন।"
-                ),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print("Failed to send rejection msg to user:", e)
-
-        del DATA["pending_submissions"][sub_id]
-        save_db()
-
-        try:
-            await query.edit_message_text(f"🚫 Entire Batch Rejected!\n👤 User: {sub_data['full_name']} ({total_ids_count} IDs)")
+            await query.edit_message_text("🚫 Submissions Rejected! (মেম্বারের কাছে নোটিফিকেশন পাঠানো হয়েছে)")
         except Exception:
             pass
         return
@@ -1086,9 +1683,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("📭 ডাটাবেজে এখনো কোনো মেম্বারের রেকর্ড নেই।")
             return
 
-        lines = ["👥 <b>ALL REGISTERED MEMBERS LIST</b>\n(নামে চাপ দিলে সরাসরি প্রোফাইলে নিয়ে যাবে)\n"]
+        lines = [f"👥 <b>বট ব্যবহারকারী সকল মেম্বারদের তালিকা (মোট: {len(all_members)} জন):</b>\n"]
         for uid, mem in all_members.items():
-            lines.append(f"👤 Name: <a href='tg://user?id={uid}'>{mem['name']}</a>\n  🆔 User ID: <code>{uid}</code>\n")
+            lines.append(f"👤 <b>Name:</b> <a href='tg://user?id={uid}'>{mem['name']}</a>\n🆔 User ID: <code>{uid}</code>\n------------------------------")
 
         full_output = "\n".join(lines)
         for start_pos in range(0, len(full_output), 3500):
@@ -1098,15 +1695,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "adm_reset_all":
         DATA["days"] = {}
         DATA["pending_submissions"] = {}
+        DATA["payments"] = {}
         save_db()
-        await query.message.reply_text("🔥 <b>সফলভাবে সমস্ত উঠা আইডি ও সাবমিশন হিস্ট্রি রিসেট করা হয়েছে!</b>", parse_mode="HTML")
+        await query.message.reply_text("🔥 <b>সফলভাবে সমস্ত আইডি, পেমেন্ট ও সাবমিশন হিস্ট্রি রিসেট করা হয়েছে!</b>", parse_mode="HTML")
         return
 
-    elif data == "adm_user_hist":
+    if data == "adm_user_hist":
         context.user_data["waiting_for"] = "view_user_hist"
         await query.message.reply_text("👤 যে ইউজারের হিস্ট্রি দেখতে চান তার <b>User ID</b> লিখে পাঠান:", parse_mode="HTML")
+        return
 
-    elif data == "adm_del_hist":
+    if data == "adm_del_hist":
         context.user_data["waiting_for"] = "del_hist_type"
         await query.message.reply_text(
             "🗑️ <b>DELETE HISTORY OPTIONS</b>\n\n"
@@ -1114,14 +1713,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• নির্দিষ্ট কোনো ইউজারের অল-টাইম ডাটা মুছতে তার <b>User ID</b> লিখুন:",
             parse_mode="HTML"
         )
+        return
 
-    elif data == "adm_broadcast":
-        context.user_data["waiting_for"] = "broadcast_message"
-        await query.message.reply_text("📢 <b>BROADCAST MESSAGE</b>\n\nসকল রেজিস্টার্ড মেম্বারদের কাছে যে মেসেজটি পাঠাতে চান তা লিখে পাঠান:", parse_mode="HTML")
-
-    elif data == "adm_msg_user":
+    if data == "adm_msg_user":
         context.user_data["waiting_for"] = "msg_user_id"
-        await query.message.reply_text("✉️ <b>MESSAGE SPECIFIC USER</b>\n\nযে ইউজারের কাছে মেসেজ পাঠাতে চান তার <b>User ID</b> লিখে পাঠান (অথবা আইডি ও মেসেজ একসাথে পাঠাতে পারেন, যেমন: <code>8114489614 Hello</code>):", parse_mode="HTML")
+        await query.message.reply_text("✉️ <b>MESSAGE SPECIFIC USER</b>\n\nযে ইউজারের কাছে মেসেজ পাঠাতে চান তার <b>User ID</b> লিখে পাঠান:", parse_mode="HTML")
+        return
 
     if data == "adm_view":
         s = DATA["settings"]
@@ -1134,56 +1731,71 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛡️ Admin Approval Mode: <code>{s['approval_mode']}</code>\n"
             f"🛠️ Maintenance Mode: <code>{s['maintenance']}</code>\n"
             f"⚙️ Duplicate Check: <code>{s['duplicate_mode']}</code>\n"
+            f"⏰ Work Schedule: <code>{s.get('work_schedule_enabled')}</code> ({s.get('start_time')} - {s.get('end_time')})\n"
+            f"💵 Price ONLY UID: <code>{s.get('price_only_uid', 0.0)} BDT</code>\n"
+            f"📄 Price PAGE UID: <code>{s.get('price_page_uid', 0.0)} BDT</code>\n"
             f"🚫 Banned Users: <code>{len(DATA['banned_users'])}</code>"
         )
         await query.message.reply_text(text, parse_mode="HTML")
+        return
 
-    elif data == "adm_toggle_approval":
+    if data == "adm_toggle_approval":
         DATA["settings"]["approval_mode"] = not DATA["settings"]["approval_mode"]
         save_db()
         status_text = "ON (অ্যাডমিন অ্যাপ্রুভ লাগবে)" if DATA["settings"]["approval_mode"] else "OFF (সরাসরি ফরোয়ার্ড হবে)"
         await query.message.reply_text(f"🟢 Approval Mode পরিবর্তন করা হয়েছে: {status_text}")
+        return
 
-    elif data == "adm_toggle_maint":
+    if data == "adm_toggle_maint":
         DATA["settings"]["maintenance"] = not DATA["settings"]["maintenance"]
         save_db()
         await query.message.reply_text(f"🟢 Bot Status এখন: {'MAINTENANCE' if DATA['settings']['maintenance'] else 'ACTIVE'}")
+        return
 
-    elif data == "adm_toggle_mode":
+    if data == "adm_toggle_mode":
         DATA["settings"]["duplicate_mode"] = "all_time" if DATA["settings"]["duplicate_mode"] == "daily" else "daily"
         save_db()
         await query.message.reply_text(f"🟢 Duplicate Mode: {DATA['settings']['duplicate_mode'].upper()}")
+        return
 
-    elif data == "adm_add_rcv":
+    if data == "adm_add_rcv":
         context.user_data["waiting_for"] = "add_rcv"
         await query.message.reply_text("📥 নতুন রিসিভার চ্যাট আইডি (Chat ID) লিখে পাঠান:")
+        return
 
-    elif data == "adm_rem_rcv":
+    if data == "adm_rem_rcv":
         context.user_data["waiting_for"] = "rem_rcv"
         await query.message.reply_text(f"📤 বাদ দেওয়ার জন্য আইডি পাঠান। বর্তমান লিস্ট: <code>{DATA['settings']['target_chat_ids']}</code>", parse_mode="HTML")
+        return
 
-    elif data == "adm_chnl":
+    if data == "adm_chnl":
         context.user_data["waiting_for"] = "set_chnl"
-        await query.message.reply_text(f"📢 নতুন প্রাইভেট বা পাবলিক চ্যানেল ইউজারনেম/লিংক পাঠান। বর্তমান: <code>{DATA['settings']['channel']}</code>", parse_mode="HTML")
+        await query.message.reply_text(f"📢 নতুন চ্যানেল ইউজারনেম/লিংক পাঠান। বর্তমান: <code>{DATA['settings']['channel']}</code>", parse_mode="HTML")
+        return
 
-    elif data == "adm_limit":
+    if data == "adm_limit":
         context.user_data["waiting_for"] = "set_limit"
-        await query.message.reply_text(f"🔢 মিনিমাম কতটি আইডি দিতে পারবে সেই সংখ্যাটি লিখুন (যেমন: 5)। বর্তমান: <code>{DATA['settings']['min_ids_limit']}</code>", parse_mode="HTML")
+        await query.message.reply_text(f"🔢 মিনিমাম আইডির সংখ্যা লিখুন। বর্তমান: <code>{DATA['settings']['min_ids_limit']}</code>", parse_mode="HTML")
+        return
 
-    elif data == "adm_ban":
+    if data == "adm_ban":
         context.user_data["waiting_for"] = "ban_user"
         await query.message.reply_text("🚫 ব্যান বা আনব্যান করার জন্য ইউজারের User ID পাঠান:")
+        return
 
-    elif data == "adm_export":
+    if data == "adm_export":
         def generate_excel():
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "Submissions Report"
-            ws.append(["Date", "User ID", "Name", "Received", "New", "Duplicate", "Rejected"])
+            ws.append(["Date", "User ID", "Name", "Received", "New", "Only UID", "Page UID", "Duplicate", "Rejected", "Earned BDT", "Payment Status"])
 
             for d_date, d_val in DATA["days"].items():
                 for u_id, mem in d_val["members"].items():
-                    ws.append([d_date, u_id, mem["name"], mem["received"], mem["new"], mem["duplicate"], mem.get("rejected", 0)])
+                    if mem["received"] > 0:
+                        earned = calculate_member_earned(mem)
+                        pay_st = get_user_payment_status(u_id, d_date)
+                        ws.append([d_date, u_id, mem["name"], mem["received"], mem["new"], mem.get("only_uid_count",0), mem.get("page_uid_count",0), mem["duplicate"], mem.get("rejected", 0), earned, pay_st])
 
             bio = io.BytesIO()
             wb.save(bio)
@@ -1191,12 +1803,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return bio
 
         excel_bio = await asyncio.to_thread(generate_excel)
-        await context.bot.send_document(
-            chat_id=user.id,
+        await query.message.reply_document(
             document=excel_bio,
-            filename=f"report_{today()}.xlsx",
+            filename=f"report_all_{today()}.xlsx",
             caption="📊 সম্পূর্ণ সাবমিশনের এক্সেল রিপোর্ট।"
         )
+        return
 
 
 # ================= MAIN =================
@@ -1217,6 +1829,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("setpayment", set_payment))
+    app.add_handler(CommandHandler("language", language_command))
+    app.add_handler(CommandHandler("support", support_command))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CallbackQueryHandler(admin_callback))
 
@@ -1225,12 +1840,12 @@ def main():
 
     app.add_error_handler(error_handler)
 
-    print("🤖 Ultra-Fast High-Tech Telegram Bot is running smoothly...")
+    print("🤖 Ultra-High-Tech Telegram Bot is running smoothly...")
     app.run_polling(drop_pending_updates=True)
 
 
-from keep_alive import keep_alive  # ফাইলের একদম উপরে ইম্পোর্ট করবেন
+from keep_alive import keep_alive
 
 if __name__ == "__main__":
-    keep_alive()  # বট রান হওয়ার আগেই ব্যাকগ্রাউন্ড সার্ভার চালু করবে
+    keep_alive()
     main()
