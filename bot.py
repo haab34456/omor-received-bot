@@ -262,9 +262,9 @@ def check_facebook_uid(uids_input):
             return {"live": valid_live, "die": valid_die}
 
     except Exception as e:
-        print(f"Fast Check Error: {e}")
-        input_list = [u.strip() for u in uids_text.split("\n") if u.strip()]
-        return {"live": input_list, "die": []}
+        # Never classify every UID as Live when the checker itself fails.
+        print(f"Fast Check Error: {type(e).__name__}: {e}")
+        return {"live": [], "die": [], "error": f"{type(e).__name__}: {e}"}
 
 
 # ================= CHANNEL JOIN & BAN CHECK =================
@@ -339,7 +339,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if lang == "en":
         msg = (
-            "<b>🤖 OMOR TECH SUBMISSION BOT</b>\n\n"
+            "<b>🤖 JIHAD TECH SUBMISSION BOT</b>\n\n"
             f"👤 <b>Name:</b> {html.escape(user.full_name)}\n"
             f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
             f"💳 <b>Payment Number:</b>\n{pay_info}\n\n"
@@ -352,7 +352,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         msg = (
-            "<b>🤖 OMOR TECH SUBMISSION BOT</b>\n\n"
+            "<b>🤖 JIHAD TECH RECEVER BOT</b>\n\n"
             f"👤 <b>Name:</b> {html.escape(user.full_name)}\n"
             f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
             f"💳 <b>Payment Number:</b>\n{pay_info}\n\n"
@@ -644,6 +644,15 @@ async def handle_incoming_data(user, ids, category, context, update_msg, file_in
     check_msg = await update_msg.reply_text("🔍 UID গুলো লাইভ চেক করা হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...")
     
     check_result = await asyncio.to_thread(check_facebook_uid, ids)
+    if check_result.get("error"):
+        print("UID CHECK ERROR:", check_result["error"])
+        await check_msg.edit_text(
+            "❌ UID Checker চালু করা যায়নি।\n"
+            "Render-এর Playwright/Chromium বা নেটওয়ার্ক সেটআপে সমস্যা হতে পারে।\n"
+            "বিস্তারিত কারণ Render Logs-এ দেখা যাবে।"
+        )
+        return
+
     live_uids = check_result.get("live", [])
     die_uids = check_result.get("die", [])
     
