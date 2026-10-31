@@ -1,3 +1,4 @@
+
 FROM mcr.microsoft.com/playwright/python:v1.64.1-jammy
 
 WORKDIR /app
@@ -7,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "bot_2.py"]
+CMD ["python", "bot.py"]
