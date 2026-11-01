@@ -352,7 +352,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         msg = (
-            "<b>🤖 JIHAD TECH RECEVER BOT</b>\n\n"
+            "<b>🤖 OMOR TECH RECEVER BOT</b>\n\n"
             f"👤 <b>Name:</b> {html.escape(user.full_name)}\n"
             f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
             f"💳 <b>Payment Number:</b>\n{pay_info}\n\n"
